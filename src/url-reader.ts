@@ -42,7 +42,9 @@ function isPrivateIpv4(hostname: string): boolean {
     hostname.startsWith("127.") ||
     hostname.startsWith("192.168.") ||
     /^172\.(1[6-9]|2\d|3[0-1])\./.test(hostname) ||
-    hostname.startsWith("169.254.")
+    hostname.startsWith("169.254.") ||
+    // Tailscale CGNAT range (100.64.0.0/10)
+    /^100\.(6[4-9]|[7-9]\d|1[01]\d|12[0-7])\./.test(hostname)
   );
 }
 
@@ -68,11 +70,8 @@ function isPrivateIPv6(hostname: string): boolean {
 }
 
 function assertUrlAllowed(url: URL): void {
-  const security = getHttpSecurityConfig();
-  if (!security.harden || security.allowPrivateUrls) {
-    return;
-  }
-
+  // Always enforce SSRF protection for URL fetching regardless of harden flag
+  // (harden flag controls HTTP endpoint auth, not URL fetch security)
   if (isPrivateHostname(url.hostname) || isPrivateIpv4(url.hostname) || isPrivateIPv6(url.hostname)) {
     throw createURLSecurityPolicyError(url.toString());
   }

@@ -12,15 +12,17 @@ import {
 } from "@modelcontextprotocol/sdk/types.js";
 
 // Import modularized functionality
-import { WEB_SEARCH_TOOL, READ_URL_TOOL, isSearXNGWebSearchArgs } from "./types.js";
+import { WEB_SEARCH_TOOL, READ_URL_TOOL, SEARCH_SUGGESTIONS_TOOL, isSearXNGWebSearchArgs } from "./types.js";
 import { logMessage, setLogLevel, getCurrentLogLevel } from "./logging.js";
 import { performWebSearch } from "./search.js";
 import { fetchAndConvertToMarkdown } from "./url-reader.js";
+import { performSearchSuggestions } from "./suggestions.js";
 import { createConfigResource, createHelpResource } from "./resources.js";
 import { createHttpServer, resolveBindHost } from "./http-server.js";
+import { searchCache } from "./search-cache.js";
 
 // Use a static version string that will be updated by the version script
-const packageVersion = "1.1.0";
+const packageVersion = "1.2.0";
 
 // Export the version for use in other modules
 export { packageVersion };
@@ -76,7 +78,7 @@ export function isWebUrlReadArgs(args: unknown): args is {
 export function createMcpServer(): McpServer {
   const mcpServer = new McpServer(
     {
-      name: "ihor-sokoliuk/mcp-searxng",
+      name: "buihongduc132/mcp-searxng",
       version: packageVersion,
     },
     {
@@ -94,7 +96,7 @@ export function createMcpServer(): McpServer {
   server.setRequestHandler(ListToolsRequestSchema, async () => {
     logMessage(mcpServer, "debug", "Handling list_tools request");
     return {
-      tools: [WEB_SEARCH_TOOL, READ_URL_TOOL],
+      tools: [WEB_SEARCH_TOOL, READ_URL_TOOL, SEARCH_SUGGESTIONS_TOOL],
     };
   });
 
@@ -109,20 +111,93 @@ export function createMcpServer(): McpServer {
           throw new Error("Invalid arguments for web search");
         }
 
+        // Build cache key from all args
+        const cacheArgs = {
+          query: args.query,
+          pageno: args.pageno,
+          categories: args.categories,
+          time_range: args.time_range,
+          language: args.language,
+          safesearch: args.safesearch,
+        };
+
+        // Check search result cache
+        const cached = searchCache.get("searxng_web_search", cacheArgs);
+        if (cached) {
+          const ageSeconds = Math.round((Date.now() - cached.timestamp) / 1000);
+          logMessage(mcpServer, "info", `Cache HIT for search: "${args.query}" (${ageSeconds}s old)`);
+          return {
+            content: [
+              {
+                type: "text",
+                text: cached.result + `\n\n_Cached: true (${ageSeconds}s ago)_`,
+              },
+            ],
+          };
+        }
+
         const result = await performWebSearch(
           mcpServer,
           args.query,
           args.pageno,
+          args.categories,
           args.time_range,
           args.language,
           args.safesearch
         );
+
+        // Cache the successful result (24h TTL)
+        searchCache.put("searxng_web_search", cacheArgs, result);
 
         return {
           content: [
             {
               type: "text",
               text: result,
+            },
+          ],
+        };
+      } else if (name === "searxng_search_suggestions") {
+        if (!args || typeof args !== "object" || !("query" in args) || typeof (args as any).query !== "string") {
+          throw new Error("Invalid arguments for search suggestions");
+        }
+
+        const suggestionsArgs = {
+          query: (args as any).query,
+          language: (args as any).language || "all",
+        };
+
+        // Check cache (1h TTL for suggestions)
+        const cached = searchCache.get("searxng_search_suggestions", suggestionsArgs);
+        if (cached) {
+          return {
+            content: [
+              {
+                type: "text",
+                text: cached.result,
+              },
+            ],
+          };
+        }
+
+        const suggestions = await performSearchSuggestions(
+          mcpServer,
+          suggestionsArgs.query,
+          suggestionsArgs.language
+        );
+
+        const resultText = suggestions.length > 0
+          ? suggestions.map((s, i) => `${i + 1}. ${s}`).join("\n")
+          : "No suggestions available for this query.";
+
+        // Cache suggestions (1h TTL via the SUGGESTIONS_TTL constant)
+        searchCache.put("searxng_search_suggestions", suggestionsArgs, resultText);
+
+        return {
+          content: [
+            {
+              type: "text",
+              text: resultText,
             },
           ],
         };
